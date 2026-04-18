@@ -5,7 +5,7 @@ import random
 import base64
 import os
 
-API_URL = "https://pnu-sp.onrender.com"
+API_URL = "https://pnu-sp.onrender.com/api"
 # 1. PAGE CONFIG & RTL STYLING
 
 st.set_page_config(page_title="PNU SmartPark", page_icon="🅿️", layout="wide")
