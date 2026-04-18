@@ -1,3 +1,4 @@
+API_URL = "https://pnu-sp.onrender.com"
 import streamlit as st
 import requests
 import random
