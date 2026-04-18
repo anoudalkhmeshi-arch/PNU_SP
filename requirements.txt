@@ -7,3 +7,5 @@ opencv-python
 numpy
 pandas
 pydantic
+streamlit
+requests
