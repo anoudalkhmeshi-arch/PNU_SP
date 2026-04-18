@@ -1,6 +1,9 @@
 fastapi
 uvicorn
+python-multipart
+ultralytics
 torch
 opencv-python
 numpy
 pandas
+pydantic
