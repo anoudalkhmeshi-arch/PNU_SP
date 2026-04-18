@@ -1,14 +1,14 @@
-API_URL = "https://pnu-sp.onrender.com"
+
 import streamlit as st
 import requests
 import random
 import base64
 import os
 
+API_URL = "https://pnu-sp.onrender.com"
 # 1. PAGE CONFIG & RTL STYLING
 
 st.set_page_config(page_title="PNU SmartPark", page_icon="🅿️", layout="wide")
-API_URL = "http://127.0.0.1:8000/api"
 
 def get_local_img(file_path):
     try:
