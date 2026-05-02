@@ -1,14 +1,13 @@
-
 import streamlit as st
 import requests
 import random
 import base64
 import os
 
-API_URL = "https://pnu-sp.onrender.com/api"
 # 1. PAGE CONFIG & RTL STYLING
 
 st.set_page_config(page_title="PNU SmartPark", page_icon="🅿️", layout="wide")
+API_URL = "http://127.0.0.1:8000/api"
 
 def get_local_img(file_path):
     try:
@@ -147,14 +146,33 @@ if page == "المراقبة والحجز":
                             elif s_time >= e_time:
                                 st.error("❌ خطأ في الوقت: يجب أن تكون النهاية بعد البداية.")
                             else:
-                                requests.post(f"{API_URL}/reserve", json={
+                             
+                                response = requests.post(f"{API_URL}/reserve", json={
                                     "student_id": student_id, "station_id": s_id, 
                                     "spot_index": st.session_state.active_reserve['index'],
                                     "start_time": str(s_time), "end_time": str(e_time)
                                 })
-                                del st.session_state.active_reserve
-                                st.success(f"تم حجز الموقف {label} بنجاح!")
-                                st.rerun()
+                                
+                             
+                                if response.status_code == 200:
+                                 
+                                    del st.session_state.active_reserve
+                                    st.success("تم حجز الموقف بنجاح! 🟩")
+                                    st.rerun()
+                                    
+                                elif response.status_code == 400:
+                                
+                                    error_msg = response.json().get("detail", "")
+                                    if "Conflict" in error_msg:
+                                        st.error("❌ عذراً، هذا الموقف محجوز مسبقاً من شخص آخر في نفس الوقت! الرجاء اختيار موقف أو وقت آخر.")
+                                    elif "Capacity" in error_msg:
+                                        st.error("🚫 عذراً، المحطة ممتلئة بالكامل حالياً!")
+                                    else:
+                                        st.error("❌ حدث خطأ أثناء الحجز، حاولي مرة أخرى.")
+                                        
+                                else:
+                                    st.error("❌ تعذر الاتصال بالخادم (Backend Offline).")
+                    
                 st.markdown("---")
 
 # PAGE 2: YOLO CAMERA SIMULATION
