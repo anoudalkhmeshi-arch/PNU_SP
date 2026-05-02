@@ -1,14 +1,27 @@
 from fastapi import FastAPI, UploadFile, File
 from pydantic import BaseModel
 import sqlite3
+import pytz
 import uvicorn
 from ultralytics import YOLO
 import cv2
 import numpy as np
 import torch
 import torch.nn as nn
-from datetime import datetime
+from datetime import datetime, timedelta
 import random
+import datetime as datetime_
+from fastapi import HTTPException
+
+
+        
+
+class ReserveRequest(BaseModel):
+    student_id: str
+    station_id: str
+    spot_index: int
+    start_time: str
+    end_time: str
 
 
 # 1. SETUP APP & STATION CAPACITIES
@@ -50,10 +63,15 @@ except:
 # 3. DATABASE INITIALIZATION
 
 def get_realistic_rate():
-    hr = datetime.now().hour
-    if 8 <= hr <= 10: return random.uniform(0.70, 0.90)
-    elif 11 <= hr <= 15: return random.uniform(0.30, 0.60)
-    else: return random.uniform(0.05, 0.15)
+    riyadh_tz = pytz.timezone('Asia/Riyadh')
+    hr = datetime_.datetime.now(riyadh_tz).hour
+    
+    if 8 <= hr <= 10: 
+        return random.uniform(0.70, 0.90)
+    elif 11 <= hr <= 15: 
+        return random.uniform(0.30, 0.60)
+    else: 
+        return random.uniform(0.05, 0.15)
 
 def init_db():
     conn = sqlite3.connect(DB_NAME)
@@ -90,36 +108,90 @@ def get_all_status():
     cursor.execute("SELECT * FROM current_status")
     status_rows = cursor.fetchall()
     
+    # Set current time to Riyadh timezone
+    import pytz
+    from datetime import datetime
+    riyadh_tz = pytz.timezone('Asia/Riyadh')
+    
     data = []
     for r in status_rows:
         s_id, last_yolo, capacity, _ = r
-        # Get active reservations
-        cursor.execute("SELECT spot_index FROM reservations WHERE station_id=?", (s_id,))
-        reserved_indices = [row[0] for row in cursor.fetchall()]
         
-        # Cumulative Logic: Occupied = YOLO count + Reservation count
-        total_occupied = min(last_yolo + len(reserved_indices), capacity)
+        # Fetch all reservations with start and end times for the station
+        cursor.execute("SELECT spot_index, start_time, end_time FROM reservations WHERE station_id=?", (s_id,))
+        all_reservations = cursor.fetchall()
+        
+        active_reserved_indices = []
+        for res in all_reservations:
+            spot_index, start_time, end_time = res
+            
+            try:
+                # Logic: Determine time format to compare based on frontend input length
+                if len(str(start_time)) > 8: 
+                    # If frontend sends (Date + Time)
+                    current_str = datetime.now(riyadh_tz).strftime("%Y-%m-%d %H:%M:%S")
+                else: 
+                    # If frontend sends (Time only)
+                    current_str = datetime.now(riyadh_tz).strftime("%H:%M")
+                
+                # Is the current time within the reservation window?
+                if str(start_time) <= current_str <= str(end_time):
+                    active_reserved_indices.append(spot_index)
+            except:
+                # Failsafe: If time parsing fails, consider it reserved to prevent double booking
+                active_reserved_indices.append(spot_index)
+        
+        # Calculate totals based only on "active" reservations at this exact moment
+        total_occupied = min(last_yolo + len(active_reserved_indices), capacity)
         free_spots = capacity - total_occupied
         
         data.append({
             "station_id": s_id, "yolo_count": last_yolo, "total_capacity": capacity,
             "free_spots": free_spots, "occupied_spots": total_occupied,
-            "reserved_indices": reserved_indices
+            "reserved_indices": active_reserved_indices
         })
     conn.close()
     return {"data": data}
 
-class ReserveRequest(BaseModel):
-    student_id: str
-    station_id: str
-    spot_index: int
-    start_time: str
-    end_time: str
+
 
 @app.post("/api/reserve")
 def reserve_spot(req: ReserveRequest):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
+    
+    # Spot-Level Conflict Check 
+    cursor.execute("SELECT start_time, end_time FROM reservations WHERE station_id=? AND spot_index=?", (req.station_id, req.spot_index))
+    existing_res = cursor.fetchall()
+    
+    
+    req_s = str(req.start_time).split()[-1][:5].zfill(5)
+    req_e = str(req.end_time).split()[-1][:5].zfill(5)
+    
+    for (db_start, db_end) in existing_res:
+        db_s = str(db_start).split()[-1][:5].zfill(5)
+        db_e = str(db_end).split()[-1][:5].zfill(5)
+        
+        # Overlap Logic: If (New Start < Existing End) AND (New End > Existing Start) -> Conflict!
+        if req_s < db_e and req_e > db_s:
+            conn.close()
+            raise HTTPException(status_code=400, detail=f"Conflict: Spot {req.spot_index} is already reserved for this time.")
+            
+    #  Station-Level Capacity Check 
+    cursor.execute("SELECT last_yolo_count, total_capacity FROM current_status WHERE station_id=?", (req.station_id,))
+    status_row = cursor.fetchone()
+    
+    if status_row:
+        last_yolo, capacity = status_row
+        cursor.execute("SELECT COUNT(*) FROM reservations WHERE station_id=?", (req.station_id,))
+        res_count = cursor.fetchone()[0]
+        
+        # If YOLO detected cars + current reservations >= total capacity, reject!
+        if (last_yolo + res_count) >= capacity:
+            conn.close()
+            raise HTTPException(status_code=400, detail="Capacity Error: Station is fully occupied.")
+            
+    # If all checks pass, save the reservation safely
     cursor.execute("INSERT INTO reservations (student_id, station_id, spot_index, start_time, end_time) VALUES (?, ?, ?, ?, ?)", 
                    (req.student_id, req.station_id, req.spot_index, req.start_time, req.end_time))
     conn.commit()
@@ -146,11 +218,46 @@ async def detect_parking(station_id: str, file: UploadFile = File(...)):
 @app.get("/api/forecast/{station_id}")
 def get_forecast(station_id: str):
     try:
-        seq = np.full((1, 16, 1), 0.5)
+        
+        # Get the current exact time in Riyadh
+        riyadh_tz = pytz.timezone('Asia/Riyadh')
+        current_time = datetime.now(riyadh_tz)
+        
+        # Dynamically generate the last 16 hours (History)
+        history = []
+        for i in range(16, 0, -1):
+            # Use timedelta to accurately get the past day and hour
+            past_time = current_time - timedelta(hours=i)
+            h = past_time.hour
+            weekday = past_time.weekday() # Monday is 0, Friday is 4, Saturday is 5
+            
+            # Weekend Logic (Friday and Saturday = Closed)
+            if weekday == 4 or weekday == 5:
+                val = random.uniform(0.0, 0.05)
+            else:
+                # Weekday Logic (PNU Pattern)
+                if 8 <= h <= 10: 
+                    val = random.uniform(0.70, 0.90)  # Morning peak
+                elif 11 <= h <= 15: 
+                    val = random.uniform(0.30, 0.60)  # Departure cycle
+                else: 
+                    val = random.uniform(0.05, 0.15)  # Off-peak
+                    
+            history.append([val])
+            
+        # 3. Feed the sequence to the LSTM model
+        seq = np.array([history])
         tensor = torch.from_numpy(seq).float()
-        with torch.no_grad(): pred = lstm_model(tensor).item()
-        return {"prediction": float(pred)}
-    except: return {"prediction": 0.0}
+        
+        with torch.no_grad(): 
+            pred = lstm_model(tensor).item()
+            
+        # Ensure the prediction is between 0 and 1
+        prediction = max(0.0, min(1.0, float(pred)))
+        return {"prediction": prediction}
+        
+    except Exception as e: 
+        return {"prediction": 0.0}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=8000)
